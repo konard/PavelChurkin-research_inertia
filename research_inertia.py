@@ -4,7 +4,94 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy import stats
 from mendeleev import element
-import csv
+import json
+import os
+
+CACHE_FILE = 'elements_cache.json'
+DB_FILE = 'research_inertia.db'
+
+
+def load_cache():
+    """Загружает кэшированные данные из JSON файла"""
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Ошибка загрузки кэша: {e}")
+    return None
+
+
+def save_cache(elements_data):
+    """Сохраняет данные элементов в JSON кэш"""
+    try:
+        with open(CACHE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(elements_data, f, ensure_ascii=False, indent=2)
+        print(f"Кэш сохранен в '{CACHE_FILE}'")
+    except Exception as e:
+        print(f"Ошибка сохранения кэша: {e}")
+
+
+def save_to_database(elements_data):
+    """Сохраняет данные в SQLite базу данных"""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+
+        # Создаем таблицу
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS elements (
+                atomic_number INTEGER PRIMARY KEY,
+                symbol TEXT,
+                name TEXT,
+                atomic_mass_kg REAL,
+                atomic_radius_pm REAL,
+                atomic_volume_m3 REAL,
+                k_coefficient REAL,
+                k_log10 REAL,
+                period INTEGER,
+                group_id INTEGER,
+                zeff REAL,
+                ionization_energy REAL,
+                electronegativity_allen REAL,
+                density REAL,
+                block TEXT
+            )
+        ''')
+
+        # Удаляем старые данные
+        cursor.execute('DELETE FROM elements')
+
+        # Вставляем новые данные
+        for e in elements_data:
+            if e.get('k_coefficient') is not None:
+                cursor.execute('''
+                    INSERT INTO elements VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    e['atomic_number'],
+                    e['symbol'],
+                    e['name'],
+                    e['atomic_mass_kg'],
+                    e['atomic_radius_pm'],
+                    e['atomic_volume_m3'],
+                    e['k_coefficient'],
+                    e['k_log10'],
+                    e['period'],
+                    e['group'],
+                    e['zeff'],
+                    e.get('ionization_energy'),
+                    e.get('electronegativity_allen'),
+                    e.get('density'),
+                    e.get('block')
+                ))
+
+        conn.commit()
+        conn.close()
+        print(f"База данных сохранена в '{DB_FILE}'")
+        return True
+    except Exception as e:
+        print(f"Ошибка сохранения в базу данных: {e}")
+        return False
 
 
 def get_atomic_radius(elem):
@@ -164,22 +251,11 @@ def analyze_dependencies(elements_data):
     print("=" * 50)
 
     if len(analysis_data) > 2:
-        # k vs Z_eff
-        zeff_vals = [d['zeff'] for d in analysis_data]
-        k_vals = [d['k'] for d in analysis_data]
-
-        # Логарифмируем с проверкой
-        log_zeff = np.log10(zeff_vals)
-        log_k = np.log10(k_vals)
-        corr, r2, pval = safe_correlation(log_zeff, log_k)
-        print(f"\nk vs Z_eff (логарифмическая шкала):")
-        print(f"  Точек данных: {len(zeff_vals)}")
-        print(f"  Корреляция: {corr:.4f}")
-        print(f"  R²: {r2:.4f}")
-
         # k vs Z_eff/V
         zeff_over_v = [d['zeff_over_v'] for d in analysis_data]
+        k_vals = [d['k'] for d in analysis_data]
         log_zv = np.log10(zeff_over_v)
+        log_k = np.log10(k_vals)
         corr_zv, r2_zv, pval_zv = safe_correlation(log_zv, log_k)
         print(f"\nk vs Z_eff/V:")
         print(f"  Корреляция: {corr_zv:.4f}")
@@ -193,27 +269,7 @@ def analyze_dependencies(elements_data):
         print(f"  Корреляция: {corr_z2v:.4f}")
         print(f"  R²: {r2_z2v:.4f}")
 
-    # 2. Корреляции в обычной шкале
-    print("\n" + "=" * 50)
-    print("КОРРЕЛЯЦИИ В ОБЫЧНОЙ ШКАЛЕ")
-    print("=" * 50)
-
-    # Z vs k
-    z_vals = [e['atomic_number'] for e in valid_data]
-    k_all = [e['k_coefficient'] for e in valid_data]
-    corr_z, r2_z, _ = safe_correlation(z_vals, k_all)
-    print(f"\nZ vs k:")
-    print(f"  Корреляция: {corr_z:.4f}")
-    print(f"  R²: {r2_z:.4f}")
-
-    # Объем vs k
-    volume_vals = [e['atomic_volume_m3'] for e in valid_data]
-    corr_v, r2_v, _ = safe_correlation(volume_vals, k_all)
-    print(f"\nV vs k:")
-    print(f"  Корреляция: {corr_v:.4f}")
-    print(f"  R²: {r2_v:.4f}")
-
-    # 3. Статистика по блокам
+    # 2. Статистика по блокам
     print("\n" + "=" * 50)
     print("СТАТИСТИКА ПО БЛОКАМ ЭЛЕМЕНТОВ")
     print("=" * 50)
@@ -239,122 +295,57 @@ def analyze_dependencies(elements_data):
 def plot_all_elements_with_labels(params):
     """Строит графики со всеми подписанными элементами"""
     analysis_data = params.get('analysis_data', [])
+    valid_data = params.get('valid_data', [])
+
     if not analysis_data:
         print("Нет данных для построения графиков")
         return
 
     symbols = [d['symbol'] for d in analysis_data]
-    zeff_vals = [d['zeff'] for d in analysis_data]
     k_vals = [d['k'] for d in analysis_data]
     zeff_over_v = [d['zeff_over_v'] for d in analysis_data]
-    zeff2_over_v = [d['zeff2_over_v'] for d in analysis_data]
 
-    # 1. Основной график: k vs Z_eff
-    plt.figure(figsize=(16, 12))
+    # Цвета периодов для легенды
+    period_colors = {
+        1: '#FF0000',  # Красный
+        2: '#FF7F00',  # Оранжевый
+        3: '#FFFF00',  # Желтый
+        4: '#00FF00',  # Зеленый
+        5: '#0000FF',  # Синий
+        6: '#4B0082',  # Индиго
+        7: '#9400D3'   # Фиолетовый
+    }
 
-    plt.subplot(2, 2, 1)
-    plt.loglog(zeff_vals, k_vals, 'o', alpha=0.5, markersize=6)
+    # 1. График k vs Z_eff/V
+    plt.figure(figsize=(16, 8))
 
-    # Подписываем ВСЕ элементы
-    for i, (z, k, sym) in enumerate(zip(zeff_vals, k_vals, symbols)):
-        # Сдвигаем позиции подписей для разных элементов
-        offset_x = 0
-        offset_y = 0
-
-        # Пропускаем перекрывающиеся подписи
-        skip = False
-        for j in range(i):
-            z_prev, k_prev = zeff_vals[j], k_vals[j]
-            if abs(z - z_prev) / z_prev < 0.05 and abs(k - k_prev) / k_prev < 0.05:
-                skip = True
-                break
-
-        if not skip:
-            # Добавляем небольшие случайные смещения для лучшей читаемости
-            offset_x = np.random.uniform(-0.02, 0.02) * z
-            offset_y = np.random.uniform(-0.02, 0.02) * k
-
-            plt.annotate(sym, (z, k),
-                         xytext=(offset_x, offset_y),
-                         textcoords='offset points',
-                         fontsize=7,
-                         ha='center',
-                         va='bottom',
-                         alpha=0.8)
-
-    plt.xlabel('Z_eff (эффективный заряд ядра)', fontsize=12)
-    plt.ylabel('Коэффициент k (кг/м³)', fontsize=12)
-    plt.title('Зависимость k от эффективного заряда ядра\n(все элементы подписаны)', fontsize=14)
-    plt.grid(True, alpha=0.3)
-
-    # 2. k vs Z_eff/V
-    plt.subplot(2, 2, 2)
+    plt.subplot(1, 2, 1)
     plt.loglog(zeff_over_v, k_vals, 'o', alpha=0.5, markersize=6)
 
+    # Подписываем элементы с простым размещением
     for i, (zv, k, sym) in enumerate(zip(zeff_over_v, k_vals, symbols)):
-        offset_x = 0
-        offset_y = 0
+        # Адаптивное размещение подписей
+        offset_angle = (i * 30) % 360  # Разные углы для разных элементов
+        offset_r = 8  # Радиус смещения в пикселях
+        offset_x = offset_r * np.cos(np.radians(offset_angle))
+        offset_y = offset_r * np.sin(np.radians(offset_angle))
 
-        skip = False
-        for j in range(i):
-            zv_prev, k_prev = zeff_over_v[j], k_vals[j]
-            if abs(zv - zv_prev) / zv_prev < 0.05 and abs(k - k_prev) / k_prev < 0.05:
-                skip = True
-                break
-
-        if not skip:
-            offset_x = np.random.uniform(-0.02, 0.02) * zv
-            offset_y = np.random.uniform(-0.02, 0.02) * k
-
-            plt.annotate(sym, (zv, k),
-                         xytext=(offset_x, offset_y),
-                         textcoords='offset points',
-                         fontsize=7,
-                         ha='center',
-                         va='bottom',
-                         alpha=0.8)
+        plt.annotate(sym, (zv, k),
+                     xytext=(offset_x, offset_y),
+                     textcoords='offset points',
+                     fontsize=6,
+                     ha='center',
+                     va='center',
+                     alpha=0.8)
 
     plt.xlabel('Z_eff / V (м⁻³)', fontsize=12)
     plt.ylabel('Коэффициент k (кг/м³)', fontsize=12)
     plt.title('k vs Z_eff/V (все элементы подписаны)', fontsize=14)
     plt.grid(True, alpha=0.3)
 
-    # 3. k vs Z_eff²/V
-    plt.subplot(2, 2, 3)
-    plt.loglog(zeff2_over_v, k_vals, 'o', alpha=0.5, markersize=6)
+    # 2. График по типам элементов (цветами блоков)
+    plt.subplot(1, 2, 2)
 
-    for i, (z2v, k, sym) in enumerate(zip(zeff2_over_v, k_vals, symbols)):
-        offset_x = 0
-        offset_y = 0
-
-        skip = False
-        for j in range(i):
-            z2v_prev, k_prev = zeff2_over_v[j], k_vals[j]
-            if abs(z2v - z2v_prev) / z2v_prev < 0.05 and abs(k - k_prev) / k_prev < 0.05:
-                skip = True
-                break
-
-        if not skip:
-            offset_x = np.random.uniform(-0.02, 0.02) * z2v
-            offset_y = np.random.uniform(-0.02, 0.02) * k
-
-            plt.annotate(sym, (z2v, k),
-                         xytext=(offset_x, offset_y),
-                         textcoords='offset points',
-                         fontsize=7,
-                         ha='center',
-                         va='bottom',
-                         alpha=0.8)
-
-    plt.xlabel('Z_eff² / V (м⁻³)', fontsize=12)
-    plt.ylabel('Коэффициент k (кг/м³)', fontsize=12)
-    plt.title('k vs Z_eff²/V (все элементы подписаны)', fontsize=14)
-    plt.grid(True, alpha=0.3)
-
-    # 4. График по типам элементов (цветами)
-    plt.subplot(2, 2, 4)
-
-    valid_data = params.get('valid_data', [])
     colors = {'s': 'red', 'p': 'blue', 'd': 'green', 'f': 'purple'}
 
     for block in colors.keys():
@@ -372,17 +363,19 @@ def plot_all_elements_with_labels(params):
             plt.loglog(block_z, block_k, 'o', color=colors[block],
                        alpha=0.6, markersize=6, label=f'{block}-элементы')
 
-            # Подписываем все элементы в блоке
-            for z, k, sym in zip(block_z, block_k, block_symbols):
-                offset_x = np.random.uniform(-0.02, 0.02) * z
-                offset_y = np.random.uniform(-0.02, 0.02) * k
+            # Подписываем элементы
+            for idx, (z, k, sym) in enumerate(zip(block_z, block_k, block_symbols)):
+                offset_angle = (idx * 30) % 360
+                offset_r = 8
+                offset_x = offset_r * np.cos(np.radians(offset_angle))
+                offset_y = offset_r * np.sin(np.radians(offset_angle))
 
                 plt.annotate(sym, (z, k),
                              xytext=(offset_x, offset_y),
                              textcoords='offset points',
-                             fontsize=6,
+                             fontsize=5,
                              ha='center',
-                             va='bottom',
+                             va='center',
                              alpha=0.7,
                              color=colors[block])
 
@@ -396,45 +389,58 @@ def plot_all_elements_with_labels(params):
     plt.savefig('all_elements_labeled.png', dpi=300, bbox_inches='tight')
     print("\nГрафик со всеми подписанными элементами сохранен как 'all_elements_labeled.png'")
 
-    # 5. Дополнительный график: Z vs k (линейная шкала)
-    plt.figure(figsize=(12, 8))
+    # 3. Основной график: Z vs k с цветами по периодам и легендой
+    plt.figure(figsize=(16, 10))
 
     z_vals = [e['atomic_number'] for e in valid_data]
     k_vals_all = [e['k_coefficient'] for e in valid_data]
+    periods = [e['period'] for e in valid_data]
     symbols_all = [e['symbol'] for e in valid_data]
 
-    plt.scatter(z_vals, k_vals_all, alpha=0.6, s=50)
+    # Группируем по периодам для легенды
+    plotted_periods = set()
+    for period in sorted(set(periods)):
+        period_z = []
+        period_k = []
+        period_symbols = []
 
-    # Подписываем ВСЕ элементы с адаптивным размещением
-    for i, (z, k, sym) in enumerate(zip(z_vals, k_vals_all, symbols_all)):
-        # Определяем смещение на основе позиции
-        if i % 3 == 0:
-            offset_y = 0.05 * k
-        elif i % 3 == 1:
-            offset_y = -0.05 * k
-        else:
-            offset_y = 0.1 * k
+        for z, k, p, sym in zip(z_vals, k_vals_all, periods, symbols_all):
+            if p == period:
+                period_z.append(z)
+                period_k.append(k)
+                period_symbols.append(sym)
 
-        # Сдвигаем по X для четных/нечетных
-        offset_x = 0.5 if i % 2 == 0 else -0.5
+        if period_z:
+            color = period_colors.get(period, '#808080')
+            plt.scatter(period_z, period_k, alpha=0.7, s=60, c=color,
+                       label=f'Период {period}', edgecolors='black', linewidth=0.5)
 
-        plt.annotate(sym, (z, k),
-                     xytext=(offset_x, offset_y),
-                     textcoords='offset points',
-                     fontsize=7,
-                     ha='center',
-                     va='bottom' if offset_y > 0 else 'top',
-                     alpha=0.8)
+            # Подписываем элементы с адаптивным размещением
+            for idx, (z, k, sym) in enumerate(zip(period_z, period_k, period_symbols)):
+                offset_angle = (idx * 40) % 360
+                offset_r = 10
+                offset_x = offset_r * np.cos(np.radians(offset_angle))
+                offset_y = offset_r * np.sin(np.radians(offset_angle))
 
-    plt.xlabel('Атомный номер Z', fontsize=12)
-    plt.ylabel('Коэффициент k (кг/м³)', fontsize=12)
-    plt.title('Зависимость k от атомного номера Z\n(все элементы подписаны)', fontsize=14)
+                plt.annotate(sym, (z, k),
+                             xytext=(offset_x, offset_y),
+                             textcoords='offset points',
+                             fontsize=7,
+                             ha='center',
+                             va='center',
+                             alpha=0.9,
+                             weight='bold')
+
+    plt.xlabel('Атомный номер Z', fontsize=14)
+    plt.ylabel('Коэффициент k (кг/м³)', fontsize=14)
+    plt.title('Зависимость К от атомного номера\n(цвет соответствует периоду элемента)', fontsize=16)
     plt.grid(True, alpha=0.3)
     plt.yscale('log')
+    plt.legend(loc='upper left', fontsize=10, framealpha=0.9)
 
     plt.tight_layout()
     plt.savefig('k_vs_Z_labeled.png', dpi=300, bbox_inches='tight')
-    print("График k vs Z сохранен как 'k_vs_Z_labeled.png'")
+    print("График k vs Z с легендой периодов сохранен как 'k_vs_Z_labeled.png'")
 
     plt.show()
 
@@ -444,58 +450,50 @@ def main():
     print("РАСЧЕТ И АНАЛИЗ КОЭФФИЦИЕНТОВ ЭФИРНОГО СЦЕПЛЕНИЯ")
     print("=" * 70)
 
-    elements_data = []
-    valid_elements = 0
+    # Попытка загрузить данные из кэша
+    elements_data = load_cache()
 
-    # Собираем данные для всех элементов
-    for atomic_number in range(1, 119):
-        try:
-            elem = element(atomic_number)
-            result = calculate_ether_coefficient(elem)
+    if elements_data:
+        print(f"\nДанные загружены из кэша '{CACHE_FILE}'")
+        print(f"Загружено элементов: {len(elements_data)}")
+        valid_elements = len([e for e in elements_data if e.get('k_coefficient') is not None])
+    else:
+        print("\nКэш не найден. Собираем данные для всех элементов...")
+        elements_data = []
+        valid_elements = 0
 
-            if result:
-                elements_data.append(result)
-                valid_elements += 1
-                print(f"{atomic_number:3}. {elem.symbol:2} - OK")
-            else:
-                print(f"{atomic_number:3}. {elem.symbol:2} - пропущен (нет данных)")
+        # Собираем данные для всех элементов
+        for atomic_number in range(1, 119):
+            try:
+                elem = element(atomic_number)
+                result = calculate_ether_coefficient(elem)
 
-        except Exception as e:
-            print(f"{atomic_number:3}. ? - ошибка: {str(e)}")
-            continue
+                if result:
+                    elements_data.append(result)
+                    valid_elements += 1
+                    print(f"{atomic_number:3}. {elem.symbol:2} - OK")
+                else:
+                    print(f"{atomic_number:3}. {elem.symbol:2} - пропущен (нет данных)")
 
-    print(f"\nУспешно обработано: {valid_elements} элементов")
+            except Exception as e:
+                print(f"{atomic_number:3}. ? - ошибка: {str(e)}")
+                continue
+
+        print(f"\nУспешно обработано: {valid_elements} элементов")
+
+        # Сохраняем в кэш
+        save_cache(elements_data)
 
     if valid_elements > 0:
+        # Сохраняем в SQLite базу данных
+        save_to_database(elements_data)
+
         # Анализ зависимостей
         params = analyze_dependencies(elements_data)
 
         if params:
             # Построение графиков со всеми подписями
             plot_all_elements_with_labels(params)
-
-            # Сохранение данных в CSV
-            with open('ether_coefficients_all.csv', 'w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow(['Z', 'Symbol', 'Name', 'k (кг/м³)', 'Z_eff', 'Volume (м³)',
-                                 'Radius (пм)', 'Period', 'Group', 'Block'])
-
-                for e in elements_data:
-                    if e['k_coefficient']:
-                        writer.writerow([
-                            e['atomic_number'],
-                            e['symbol'],
-                            e['name'],
-                            e['k_coefficient'],
-                            e['zeff'] if 'zeff' in e else '',
-                            e['atomic_volume_m3'],
-                            e['atomic_radius_pm'],
-                            e['period'],
-                            e['group'],
-                            e.get('block', '')
-                        ])
-
-            print(f"\nДанные сохранены в 'ether_coefficients_all.csv'")
 
     print("\n" + "=" * 70)
     print("АНАЛИЗ ЗАВЕРШЕН")
