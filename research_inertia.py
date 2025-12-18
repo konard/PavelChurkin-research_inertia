@@ -222,7 +222,8 @@ def analyze_dependencies(elements_data):
     # Собираем данные для анализа
     analysis_data = []
     for e in valid_data:
-        if e['zeff'] is not None and e['atomic_volume_m3'] is not None:
+        # Фильтруем элементы с положительным Z_eff для логарифмического анализа
+        if e['zeff'] is not None and e['atomic_volume_m3'] is not None and e['zeff'] > 0:
             analysis_data.append({
                 'symbol': e['symbol'],
                 'k': e['k_coefficient'],
