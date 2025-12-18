@@ -26,6 +26,8 @@ wheels/
 # Data and cache files
 atomic_data.db
 atomic_data_cache.json
+elements_cache.json
+research_inertia.db
 *.csv
 
 # Generated plots
