@@ -143,22 +143,91 @@ def calculate_atomic_volume(radius_pm):
 
 
 def get_effective_nuclear_charge(elem):
-    """Оцениваем эффективный заряд ядра Z_eff"""
+    """
+    Вычисляет эффективный заряд ядра по правилу Слейтера.
+
+    Правила Слейтера для расчета экранирования S:
+
+    Для электронов на ns или np орбиталях:
+    - Электроны той же группы (ns, np): каждый дает вклад 0.35
+      (в группе 1s вклад 0.30)
+    - Электроны слоя (n-1): каждый дает вклад 0.85
+    - Электроны слоя (n-2) и глубже: каждый дает вклад 1.00
+
+    Для электронов на nd или nf орбиталях:
+    - Электроны той же группы: каждый дает вклад 0.35
+    - Все электроны в группах левее: каждый дает вклад 1.00
+
+    Args:
+        elem: Элемент из библиотеки mendeleev
+
+    Returns:
+        float: Эффективный заряд ядра Z_eff = Z - S
+
+    Examples:
+        Азот (Z=7, конфигурация 1s² 2s² 2p³):
+        S = (4 * 0.35) + (2 * 0.85) = 1.4 + 1.7 = 3.1
+        Z_eff = 7 - 3.1 = 3.9
+
+        Цинк (Z=30, конфигурация [Ar] 3d¹⁰ 4s²):
+        S = (1 * 0.35) + (18 * 0.85) + (10 * 1.00) = 0.35 + 15.3 + 10 = 25.65
+        Z_eff = 30 - 25.65 = 4.35
+    """
     Z = elem.atomic_number
 
-    # Упрощенная оценка по правилам Слейтера
-    if Z <= 2:  # H, He
-        return Z - 0.30
-    elif Z <= 10:  # Li до Ne
-        return Z - 4.15
-    elif Z <= 18:  # Na до Ar
-        return Z - 8.85
-    elif Z <= 36:  # K до Kr
-        return Z - 17.15
-    elif Z <= 54:  # Rb до Xe
-        return Z - 26.25
-    else:
-        return Z * 0.85  # Для тяжелых элементов
+    # Получаем электронную конфигурацию как OrderedDict {(n, orbital): count}
+    ec_conf = elem.ec.conf
+
+    # Преобразуем в список для удобства обработки
+    config = [(n, orb, count) for (n, orb), count in ec_conf.items()]
+
+    if not config:
+        return float(Z)
+
+    # Находим внешний (валентный) электрон - последний в конфигурации
+    n_outer, orb_outer, count_outer = config[-1]
+
+    # Вычисляем константу экранирования S
+    S = 0.0
+
+    if orb_outer in ['s', 'p']:
+        # Правила для ns, np орбиталей
+        for n, orb, count in config:
+            if (n, orb) == (n_outer, orb_outer):
+                # Та же орбиталь - не учитываем экранируемый электрон
+                if n == 1 and orb == 's':
+                    # Особый случай для 1s
+                    S += (count - 1) * 0.30
+                else:
+                    S += (count - 1) * 0.35
+            elif n == n_outer and orb in ['s', 'p']:
+                # Та же оболочка, другая орбиталь в группе s,p
+                if n == 1:
+                    S += count * 0.30
+                else:
+                    S += count * 0.35
+            elif n == n_outer - 1:
+                # Одна оболочка ниже (n-1)
+                S += count * 0.85
+            elif n < n_outer - 1:
+                # Две и более оболочек ниже (n-2 и глубже)
+                S += count * 1.00
+
+    elif orb_outer in ['d', 'f']:
+        # Правила для nd, nf орбиталей
+        for n, orb, count in config:
+            if (n, orb) == (n_outer, orb_outer):
+                # Та же орбиталь - не учитываем экранируемый электрон
+                S += (count - 1) * 0.35
+            elif n == n_outer and orb == orb_outer:
+                # Та же группа
+                S += count * 0.35
+            else:
+                # Все остальные электроны левее
+                S += count * 1.00
+
+    Z_eff = Z - S
+    return Z_eff
 
 
 def calculate_ether_coefficient(elem):
