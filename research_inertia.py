@@ -10,6 +10,11 @@ import os
 CACHE_FILE = 'elements_cache.json'
 DB_FILE = 'research_inertia.db'
 
+# Physical constants (in kg)
+PROTON_MASS = 1.67262192369e-27  # kg
+NEUTRON_MASS = 1.67492749804e-27  # kg
+AMU_TO_KG = 1.66053906660e-27  # Atomic mass unit to kg conversion
+
 
 def load_cache():
     """Загружает кэшированные данные из JSON файла"""
@@ -55,7 +60,12 @@ def save_to_database(elements_data):
                 ionization_energy REAL,
                 electronegativity_allen REAL,
                 density REAL,
-                block TEXT
+                block TEXT,
+                neutron_count REAL,
+                neutron_rounding_diff REAL,
+                nucleon_mass_sum_kg REAL,
+                mass_defect_kg REAL,
+                mass_defect_per_volume REAL
             )
         ''')
 
@@ -66,7 +76,7 @@ def save_to_database(elements_data):
         for e in elements_data:
             if e.get('k_coefficient') is not None:
                 cursor.execute('''
-                    INSERT INTO elements VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO elements VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     e['atomic_number'],
                     e['symbol'],
@@ -82,7 +92,12 @@ def save_to_database(elements_data):
                     e.get('ionization_energy'),
                     e.get('electronegativity_allen'),
                     e.get('density'),
-                    e.get('block')
+                    e.get('block'),
+                    e.get('neutron_count'),
+                    e.get('neutron_rounding_diff'),
+                    e.get('nucleon_mass_sum_kg'),
+                    e.get('mass_defect_kg'),
+                    e.get('mass_defect_per_volume')
                 ))
 
         conn.commit()
@@ -140,6 +155,54 @@ def calculate_atomic_volume(radius_pm):
         return None
     r_m = radius_pm * 1e-12
     return (4 / 3) * math.pi * (r_m ** 3)
+
+
+def calculate_mass_defect(elem, atomic_mass_kg):
+    """
+    Рассчитывает дефект массы и связанные параметры.
+
+    Дефект массы = атомная масса - сумма масс нуклонов
+    (не вычитая массу ядра, как принято в классической физике,
+    а вычитая сумму масс протонов и нейтронов)
+
+    Args:
+        elem: Элемент из библиотеки mendeleev
+        atomic_mass_kg: Атомная масса в килограммах
+
+    Returns:
+        dict: Словарь с полями neutron_count, neutron_rounding_diff,
+              nucleon_mass_sum_kg, mass_defect_kg
+    """
+    Z = elem.atomic_number  # количество протонов
+
+    # Получаем атомную массу в а.е.м.
+    atomic_mass_amu = elem.atomic_weight
+    if atomic_mass_amu is None:
+        return None
+
+    # Рассчитываем количество нейтронов
+    # N = A - Z, где A - массовое число (округленная атомная масса)
+    A_exact = atomic_mass_amu  # точная атомная масса
+    A_rounded = round(A_exact)  # округленная атомная масса
+
+    # Разница округления (со знаком)
+    rounding_diff = A_exact - A_rounded
+
+    # Количество нейтронов (может быть дробным для точного расчета)
+    N_exact = A_exact - Z
+
+    # Сумма масс нуклонов
+    nucleon_mass_sum_kg = Z * PROTON_MASS + N_exact * NEUTRON_MASS
+
+    # Дефект массы = атомная масса - сумма масс нуклонов
+    mass_defect_kg = atomic_mass_kg - nucleon_mass_sum_kg
+
+    return {
+        'neutron_count': N_exact,
+        'neutron_rounding_diff': rounding_diff,
+        'nucleon_mass_sum_kg': nucleon_mass_sum_kg,
+        'mass_defect_kg': mass_defect_kg
+    }
 
 
 def get_effective_nuclear_charge(elem):
@@ -262,7 +325,11 @@ def calculate_ether_coefficient(elem):
     # Рассчитываем дополнительные параметры
     Z_eff = get_effective_nuclear_charge(elem)
 
-    return {
+    # Рассчитываем дефект массы
+    mass_defect_data = calculate_mass_defect(elem, mass_per_atom_kg)
+
+    # Создаем базовый результат
+    result = {
         'atomic_number': elem.atomic_number,
         'symbol': elem.symbol,
         'name': elem.name,
@@ -279,6 +346,22 @@ def calculate_ether_coefficient(elem):
         'density': elem.density if hasattr(elem, 'density') else None,
         'block': elem.block
     }
+
+    # Добавляем данные о дефекте массы, если они есть
+    if mass_defect_data:
+        result['neutron_count'] = mass_defect_data['neutron_count']
+        result['neutron_rounding_diff'] = mass_defect_data['neutron_rounding_diff']
+        result['nucleon_mass_sum_kg'] = mass_defect_data['nucleon_mass_sum_kg']
+        result['mass_defect_kg'] = mass_defect_data['mass_defect_kg']
+        result['mass_defect_per_volume'] = mass_defect_data['mass_defect_kg'] / volume_m3
+    else:
+        result['neutron_count'] = None
+        result['neutron_rounding_diff'] = None
+        result['nucleon_mass_sum_kg'] = None
+        result['mass_defect_kg'] = None
+        result['mass_defect_per_volume'] = None
+
+    return result
 
 
 def analyze_dependencies(elements_data):
@@ -520,6 +603,98 @@ def plot_all_elements_with_labels(params):
     plt.show()
 
 
+def plot_mass_defect_dependencies(valid_data):
+    """
+    Строит графики зависимостей с дефектом массы:
+    1. Коэффициент сцепления k vs дефект массы/объём
+    2. Z_eff vs дефект массы
+    """
+    # Фильтруем элементы с данными о дефекте массы
+    data_with_mass_defect = [e for e in valid_data
+                             if e.get('mass_defect_kg') is not None
+                             and e.get('mass_defect_per_volume') is not None]
+
+    if len(data_with_mass_defect) < 3:
+        print("Недостаточно данных для построения графиков с дефектом массы")
+        return
+
+    print(f"\nПостроение графиков с дефектом массы для {len(data_with_mass_defect)} элементов...")
+
+    # Извлекаем данные
+    symbols = [e['symbol'] for e in data_with_mass_defect]
+    k_vals = [e['k_coefficient'] for e in data_with_mass_defect]
+    mass_defect_per_volume = [e['mass_defect_per_volume'] for e in data_with_mass_defect]
+    mass_defect = [e['mass_defect_kg'] for e in data_with_mass_defect]
+    zeff = [e['zeff'] for e in data_with_mass_defect]
+
+    # Создаем новое окно с двумя графиками
+    plt.figure(figsize=(16, 8))
+
+    # График 1: Коэффициент сцепления vs дефект массы/объём
+    plt.subplot(1, 2, 1)
+
+    # Используем scatter с цветом по атомному номеру
+    atomic_numbers = [e['atomic_number'] for e in data_with_mass_defect]
+    scatter1 = plt.scatter(mass_defect_per_volume, k_vals,
+                          c=atomic_numbers, cmap='viridis',
+                          alpha=0.6, s=60, edgecolors='black', linewidth=0.5)
+
+    # Подписываем элементы
+    for i, (mdv, k, sym) in enumerate(zip(mass_defect_per_volume, k_vals, symbols)):
+        offset_angle = (i * 30) % 360
+        offset_r = 8
+        offset_x = offset_r * np.cos(np.radians(offset_angle))
+        offset_y = offset_r * np.sin(np.radians(offset_angle))
+
+        plt.annotate(sym, (mdv, k),
+                     xytext=(offset_x, offset_y),
+                     textcoords='offset points',
+                     fontsize=6,
+                     ha='center',
+                     va='center',
+                     alpha=0.8)
+
+    plt.xlabel('Дефект массы / Объём (кг/м³)', fontsize=12)
+    plt.ylabel('Коэффициент сцепления k (кг/м³)', fontsize=12)
+    plt.title('Зависимость коэффициента сцепления\nот дефекта массы на единицу объема', fontsize=14)
+    plt.grid(True, alpha=0.3)
+    plt.colorbar(scatter1, label='Атомный номер Z')
+
+    # График 2: Z_eff vs дефект массы
+    plt.subplot(1, 2, 2)
+
+    scatter2 = plt.scatter(mass_defect, zeff,
+                          c=atomic_numbers, cmap='viridis',
+                          alpha=0.6, s=60, edgecolors='black', linewidth=0.5)
+
+    # Подписываем элементы
+    for i, (md, z, sym) in enumerate(zip(mass_defect, zeff, symbols)):
+        offset_angle = (i * 30) % 360
+        offset_r = 8
+        offset_x = offset_r * np.cos(np.radians(offset_angle))
+        offset_y = offset_r * np.sin(np.radians(offset_angle))
+
+        plt.annotate(sym, (md, z),
+                     xytext=(offset_x, offset_y),
+                     textcoords='offset points',
+                     fontsize=6,
+                     ha='center',
+                     va='center',
+                     alpha=0.8)
+
+    plt.xlabel('Дефект массы (кг)', fontsize=12)
+    plt.ylabel('Эффективный заряд ядра Z_eff', fontsize=12)
+    plt.title('Зависимость эффективного заряда ядра\nот дефекта массы', fontsize=14)
+    plt.grid(True, alpha=0.3)
+    plt.colorbar(scatter2, label='Атомный номер Z')
+
+    plt.tight_layout()
+    plt.savefig('mass_defect_dependencies.png', dpi=300, bbox_inches='tight')
+    print("Графики с дефектом массы сохранены как 'mass_defect_dependencies.png'")
+
+    plt.show()
+
+
 def main():
     print("=" * 70)
     print("РАСЧЕТ И АНАЛИЗ КОЭФФИЦИЕНТОВ ЭФИРНОГО СЦЕПЛЕНИЯ")
@@ -569,6 +744,9 @@ def main():
         if params:
             # Построение графиков со всеми подписями
             plot_all_elements_with_labels(params)
+
+            # Построение дополнительных графиков с дефектом массы
+            plot_mass_defect_dependencies(params['valid_data'])
 
     print("\n" + "=" * 70)
     print("АНАЛИЗ ЗАВЕРШЕН")
