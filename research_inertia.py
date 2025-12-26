@@ -15,6 +15,9 @@ PROTON_MASS = 1.67262192369e-27  # kg
 NEUTRON_MASS = 1.67492749804e-27  # kg
 AMU_TO_KG = 1.66053906660e-27  # Atomic mass unit to kg conversion
 
+# Normal conditions for physical state determination
+NORMAL_TEMP_K = 298.15  # 25°C in Kelvin
+
 
 def load_cache():
     """Загружает кэшированные данные из JSON файла"""
@@ -65,7 +68,8 @@ def save_to_database(elements_data):
                 neutron_rounding_diff REAL,
                 nucleon_mass_sum_kg REAL,
                 mass_defect_kg REAL,
-                mass_defect_per_volume REAL
+                mass_defect_per_volume REAL,
+                physical_state TEXT
             )
         ''')
 
@@ -76,7 +80,7 @@ def save_to_database(elements_data):
         for e in elements_data:
             if e.get('k_coefficient') is not None:
                 cursor.execute('''
-                    INSERT INTO elements VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO elements VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     e['atomic_number'],
                     e['symbol'],
@@ -97,7 +101,8 @@ def save_to_database(elements_data):
                     e.get('neutron_rounding_diff'),
                     e.get('nucleon_mass_sum_kg'),
                     e.get('mass_defect_kg'),
-                    e.get('mass_defect_per_volume')
+                    e.get('mass_defect_per_volume'),
+                    e.get('physical_state')
                 ))
 
         conn.commit()
@@ -203,6 +208,41 @@ def calculate_mass_defect(elem, atomic_mass_kg):
         'nucleon_mass_sum_kg': nucleon_mass_sum_kg,
         'mass_defect_kg': mass_defect_kg
     }
+
+
+def get_physical_state(elem):
+    """
+    Определяет агрегатное состояние элемента при нормальных условиях (25°C = 298.15K, 1 атм).
+
+    Args:
+        elem: Элемент из библиотеки mendeleev
+
+    Returns:
+        str: 'solid', 'liquid', 'gas', или 'unknown'
+    """
+    mp = elem.melting_point  # Температура плавления в K
+    bp = elem.boiling_point  # Температура кипения в K
+
+    # Если нет данных, не можем определить
+    if mp is None and bp is None:
+        return 'unknown'
+
+    # Газ: температура кипения ниже нормальной температуры
+    if bp is not None and bp < NORMAL_TEMP_K:
+        return 'gas'
+
+    # Жидкость: температура плавления ниже нормальной, кипения выше
+    if mp is not None and mp < NORMAL_TEMP_K:
+        if bp is not None and bp > NORMAL_TEMP_K:
+            return 'liquid'
+        # Если температура кипения неизвестна, предполагаем твердое состояние
+        return 'solid'
+
+    # Твердое: температура плавления выше нормальной температуры
+    if mp is not None and mp >= NORMAL_TEMP_K:
+        return 'solid'
+
+    return 'unknown'
 
 
 def get_effective_nuclear_charge(elem):
@@ -328,6 +368,14 @@ def calculate_ether_coefficient(elem):
     # Рассчитываем дефект массы
     mass_defect_data = calculate_mass_defect(elem, mass_per_atom_kg)
 
+    # Получаем физическое состояние
+    physical_state = get_physical_state(elem)
+
+    # Получаем первую энергию ионизации
+    ionization_energy = None
+    if hasattr(elem, 'ionenergies') and elem.ionenergies:
+        ionization_energy = elem.ionenergies.get(1)  # Первая энергия ионизации
+
     # Создаем базовый результат
     result = {
         'atomic_number': elem.atomic_number,
@@ -341,10 +389,11 @@ def calculate_ether_coefficient(elem):
         'period': elem.period,
         'group': elem.group_id,
         'zeff': Z_eff,
-        'ionization_energy': elem.en_allen if hasattr(elem, 'en_allen') else None,
+        'ionization_energy': ionization_energy,
         'electronegativity_allen': elem.en_allen if hasattr(elem, 'en_allen') else None,
         'density': elem.density if hasattr(elem, 'density') else None,
-        'block': elem.block
+        'block': elem.block,
+        'physical_state': physical_state
     }
 
     # Добавляем данные о дефекте массы, если они есть
@@ -695,6 +744,138 @@ def plot_mass_defect_dependencies(valid_data):
     plt.show()
 
 
+def plot_volume_vs_ionization_energy(valid_data):
+    """
+    Строит графики зависимости объема от энергии ионизации
+    с легендой агрегатного состояния элемента.
+    """
+    # Фильтруем элементы с данными об объеме и энергии ионизации
+    data_with_ie = [e for e in valid_data
+                    if e.get('ionization_energy') is not None
+                    and e.get('atomic_volume_m3') is not None
+                    and e.get('physical_state') is not None]
+
+    if len(data_with_ie) < 3:
+        print("Недостаточно данных для построения графиков объем vs энергия ионизации")
+        return
+
+    print(f"\nПостроение графиков объем vs энергия ионизации для {len(data_with_ie)} элементов...")
+
+    # Цвета и маркеры для агрегатных состояний
+    state_colors = {
+        'solid': '#1f77b4',    # Синий
+        'liquid': '#ff7f0e',   # Оранжевый
+        'gas': '#2ca02c',      # Зеленый
+        'unknown': '#7f7f7f'   # Серый
+    }
+
+    state_names_ru = {
+        'solid': 'Твердые',
+        'liquid': 'Жидкие',
+        'gas': 'Газообразные',
+        'unknown': 'Неизвестно'
+    }
+
+    # Группируем по агрегатному состоянию
+    data_by_state = {'solid': [], 'liquid': [], 'gas': [], 'unknown': []}
+    for e in data_with_ie:
+        state = e['physical_state']
+        data_by_state[state].append(e)
+
+    # Создаем фигуру с двумя графиками
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 8))
+
+    # График 1: Объем vs Энергия ионизации (линейная шкала)
+    for state in ['solid', 'liquid', 'gas', 'unknown']:
+        if not data_by_state[state]:
+            continue
+
+        volumes = [e['atomic_volume_m3'] for e in data_by_state[state]]
+        ionization_energies = [e['ionization_energy'] for e in data_by_state[state]]
+        symbols = [e['symbol'] for e in data_by_state[state]]
+
+        ax1.scatter(ionization_energies, volumes,
+                   color=state_colors[state],
+                   label=state_names_ru[state],
+                   alpha=0.7, s=60, edgecolors='black', linewidth=0.5)
+
+        # Подписываем элементы
+        for i, (ie, vol, sym) in enumerate(zip(ionization_energies, volumes, symbols)):
+            offset_angle = (i * 30) % 360
+            offset_r = 8
+            offset_x = offset_r * np.cos(np.radians(offset_angle))
+            offset_y = offset_r * np.sin(np.radians(offset_angle))
+
+            ax1.annotate(sym, (ie, vol),
+                        xytext=(offset_x, offset_y),
+                        textcoords='offset points',
+                        fontsize=6,
+                        ha='center',
+                        va='center',
+                        alpha=0.8)
+
+    ax1.set_xlabel('Энергия ионизации (эВ)', fontsize=12)
+    ax1.set_ylabel('Атомный объём (м³)', fontsize=12)
+    ax1.set_title('Зависимость объёма от энергии ионизации\n(линейная шкала)', fontsize=14)
+    ax1.grid(True, alpha=0.3)
+    ax1.legend(loc='best', fontsize=11, framealpha=0.9)
+
+    # График 2: Объем vs Энергия ионизации (логарифмическая шкала)
+    for state in ['solid', 'liquid', 'gas', 'unknown']:
+        if not data_by_state[state]:
+            continue
+
+        volumes = [e['atomic_volume_m3'] for e in data_by_state[state]]
+        ionization_energies = [e['ionization_energy'] for e in data_by_state[state]]
+        symbols = [e['symbol'] for e in data_by_state[state]]
+
+        ax2.scatter(ionization_energies, volumes,
+                   color=state_colors[state],
+                   label=state_names_ru[state],
+                   alpha=0.7, s=60, edgecolors='black', linewidth=0.5)
+
+        # Подписываем элементы
+        for i, (ie, vol, sym) in enumerate(zip(ionization_energies, volumes, symbols)):
+            offset_angle = (i * 30) % 360
+            offset_r = 8
+            offset_x = offset_r * np.cos(np.radians(offset_angle))
+            offset_y = offset_r * np.sin(np.radians(offset_angle))
+
+            ax2.annotate(sym, (ie, vol),
+                        xytext=(offset_x, offset_y),
+                        textcoords='offset points',
+                        fontsize=6,
+                        ha='center',
+                        va='center',
+                        alpha=0.8)
+
+    ax2.set_xlabel('Энергия ионизации (эВ)', fontsize=12)
+    ax2.set_ylabel('Атомный объём (м³)', fontsize=12)
+    ax2.set_title('Зависимость объёма от энергии ионизации\n(логарифмическая шкала)', fontsize=14)
+    ax2.set_xscale('log')
+    ax2.set_yscale('log')
+    ax2.grid(True, alpha=0.3, which='both')
+    ax2.legend(loc='best', fontsize=11, framealpha=0.9)
+
+    plt.tight_layout()
+    plt.savefig('volume_vs_ionization_energy.png', dpi=300, bbox_inches='tight')
+    print("Графики объем vs энергия ионизации сохранены как 'volume_vs_ionization_energy.png'")
+
+    # Статистика по агрегатным состояниям
+    print("\n" + "=" * 60)
+    print("СТАТИСТИКА ПО АГРЕГАТНЫМ СОСТОЯНИЯМ")
+    print("=" * 60)
+
+    for state in ['solid', 'liquid', 'gas', 'unknown']:
+        if data_by_state[state]:
+            count = len(data_by_state[state])
+            symbols = [e['symbol'] for e in data_by_state[state]]
+            print(f"\n{state_names_ru[state]} ({count}):")
+            print(f"  Элементы: {', '.join(symbols)}")
+
+    plt.show()
+
+
 def main():
     print("=" * 70)
     print("РАСЧЕТ И АНАЛИЗ КОЭФФИЦИЕНТОВ ЭФИРНОГО СЦЕПЛЕНИЯ")
@@ -747,6 +928,9 @@ def main():
 
             # Построение дополнительных графиков с дефектом массы
             plot_mass_defect_dependencies(params['valid_data'])
+
+            # Построение графиков объем vs энергия ионизации
+            plot_volume_vs_ionization_energy(params['valid_data'])
 
     print("\n" + "=" * 70)
     print("АНАЛИЗ ЗАВЕРШЕН")
